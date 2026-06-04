@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Presence QR System</title>
+    <link rel="icon" href="{{ url_for('static', filename='web/favicon.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='web/styles.css') }}">
+  </head>
+  <body>
+    <div id="app"></div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" integrity="sha512-M11z7mBQTfDbiVfFs9VEyHZLskU03jR74U2nJwKtYpmqJOPMCEfCKN6fGyEhWwP+Ze0elY46K5qFYZX7d8G8lQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="{{ url_for('static', filename='web/app.js') }}"></script>
+  </body>
+</html>

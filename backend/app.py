@@ -8,7 +8,7 @@ from email.message import EmailMessage
 from math import asin, cos, radians, sin, sqrt
 
 import psycopg
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, render_template, request, send_from_directory
 from flask_cors import CORS
 from psycopg.rows import dict_row
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -40,6 +40,7 @@ app = Flask(__name__)
 CORS(app)
 DB_INITIALIZED = False
 PAGES_DIR = os.path.join(os.path.dirname(__file__), "static", "pages")
+PASSWORD_HASH_METHOD = "pbkdf2:sha256"
 
 
 @contextmanager
@@ -146,11 +147,36 @@ def user_payload(user):
         "jobTitle": user.get("job_title") or "",
         "role": user["role"],
         "status": user["status"],
+        "companyId": user.get("company_id"),
+        "companyName": user.get("company_name") or "",
+        "companyStatus": user.get("company_status") or "",
+    }
+
+
+def company_payload(company):
+    return {
+        "id": company["id"],
+        "name": company["name"],
+        "status": company["status"],
+        "latitude": company.get("latitude"),
+        "longitude": company.get("longitude"),
+        "radiusMeters": company.get("radius_m"),
     }
 
 
 def init_db():
     schema_statements = [
+        """
+    CREATE TABLE IF NOT EXISTS companies (
+      id BIGSERIAL PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'active',
+      latitude DOUBLE PRECISION NOT NULL DEFAULT 18.0735,
+      longitude DOUBLE PRECISION NOT NULL DEFAULT -15.9582,
+      radius_m DOUBLE PRECISION NOT NULL DEFAULT 150,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
         """
     CREATE TABLE IF NOT EXISTS users (
       id BIGSERIAL PRIMARY KEY,
@@ -161,6 +187,7 @@ def init_db():
       job_title TEXT DEFAULT '',
       role TEXT NOT NULL DEFAULT 'worker',
       status TEXT NOT NULL DEFAULT 'pending',
+      company_id BIGINT REFERENCES companies(id),
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
@@ -194,6 +221,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS locations (
       id BIGSERIAL PRIMARY KEY,
       email TEXT NOT NULL,
+      company_id BIGINT REFERENCES companies(id),
       url TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
@@ -209,40 +237,103 @@ def init_db():
     with db_conn() as conn:
         for statement in schema_statements:
             conn.execute(statement)
+        conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS company_id BIGINT")
+        conn.execute("ALTER TABLE locations ADD COLUMN IF NOT EXISTS company_id BIGINT")
+        conn.execute(
+            """
+            INSERT INTO companies (name, status, latitude, longitude, radius_m)
+            VALUES (%s, 'active', 18.0735, -15.9582, 150)
+            ON CONFLICT (name) DO NOTHING
+            """,
+            ("CODEVA",),
+        )
+        default_company = conn.execute(
+            "SELECT id FROM companies WHERE name = %s",
+            ("CODEVA",),
+        ).fetchone()
+        default_company_id = default_company["id"]
         admin = conn.execute(
             "SELECT id FROM users WHERE email = %s",
             ("admin@gmail.com",),
         ).fetchone()
-        admin_password = generate_password_hash("codeva123")
+        admin_password = generate_password_hash("codeva123", method=PASSWORD_HASH_METHOD)
         if admin is None:
             conn.execute(
                 """
                 INSERT INTO users
-                  (full_name, email, password_hash, phone, job_title, role, status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                  (full_name, email, password_hash, phone, job_title, role, status, company_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
-                ("Admin", "admin@gmail.com", admin_password, "", "Admin", "admin", "approved"),
+                (
+                    "Admin",
+                    "admin@gmail.com",
+                    admin_password,
+                    "",
+                    "Admin",
+                    "admin",
+                    "approved",
+                    default_company_id,
+                ),
             )
         else:
             conn.execute(
                 """
                 UPDATE users
-                   SET password_hash = %s, role = 'admin', status = 'approved'
+                   SET password_hash = %s,
+                       role = 'admin',
+                       status = 'approved',
+                       company_id = COALESCE(company_id, %s)
                  WHERE email = 'admin@gmail.com'
                 """,
-                (admin_password,),
+                (admin_password, default_company_id),
             )
 
-        count = conn.execute("SELECT COUNT(*) AS total FROM users").fetchone()["total"]
-        if count <= 1:
-            demo_password = generate_password_hash("1234")
+        developer_email = os.getenv("DEVELOPER_EMAIL", "developer@codeva.local")
+        developer_password = generate_password_hash(
+            os.getenv("DEVELOPER_PASSWORD", "codeva123"),
+            method=PASSWORD_HASH_METHOD,
+        )
+        developer = conn.execute(
+            "SELECT id FROM users WHERE email = %s",
+            (developer_email,),
+        ).fetchone()
+        if developer is None:
             conn.execute(
                 """
                 INSERT INTO users
-                  (full_name, email, password_hash, phone, job_title, role, status)
+                  (full_name, email, password_hash, phone, job_title, role, status, company_id)
+                VALUES (%s, %s, %s, %s, %s, 'developer', 'approved', NULL)
+                """,
+                ("Developer", developer_email, developer_password, "", "Developer"),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE users
+                   SET password_hash = %s,
+                       role = 'developer',
+                       status = 'approved',
+                       company_id = NULL
+                 WHERE email = %s
+                """,
+                (developer_password, developer_email),
+            )
+
+        conn.execute(
+            "UPDATE users SET company_id = %s WHERE company_id IS NULL AND role <> 'developer'",
+            (default_company_id,),
+        )
+
+        count = conn.execute("SELECT COUNT(*) AS total FROM users").fetchone()["total"]
+        if count <= 2:
+            demo_password = generate_password_hash("1234", method=PASSWORD_HASH_METHOD)
+            conn.execute(
+                """
+                INSERT INTO users
+                  (full_name, email, password_hash, phone, job_title, role, status, company_id)
                 VALUES
-                  (%s, %s, %s, %s, %s, %s, %s),
-                  (%s, %s, %s, %s, %s, %s, %s)
+                  (%s, %s, %s, %s, %s, %s, %s, %s),
+                  (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (email) DO NOTHING
                 """,
                 (
@@ -253,6 +344,7 @@ def init_db():
                     "Groupe A",
                     "worker",
                     "approved",
+                    default_company_id,
                     "User Pending",
                     "user2@local",
                     demo_password,
@@ -260,6 +352,7 @@ def init_db():
                     "Groupe B",
                     "worker",
                     "pending",
+                    default_company_id,
                 ),
             )
         defaults = {
@@ -299,7 +392,59 @@ def ensure_otp_columns(conn):
     conn.execute("ALTER TABLE email_otps ALTER COLUMN purpose SET DEFAULT 'login'")
 
 
-def get_company_location(conn):
+def actor_email():
+    data = request.get_json(silent=True) or {}
+    return (
+        request.headers.get("X-User-Email")
+        or request.args.get("actorEmail")
+        or request.args.get("adminEmail")
+        or data.get("actorEmail")
+        or data.get("adminEmail")
+        or ""
+    ).strip()
+
+
+def user_with_company(conn, email):
+    return conn.execute(
+        """
+        SELECT u.*, c.name AS company_name, c.status AS company_status
+          FROM users u
+          LEFT JOIN companies c ON u.company_id = c.id
+         WHERE u.email = %s
+        """,
+        (email,),
+    ).fetchone()
+
+
+def require_actor(conn, roles):
+    user = user_with_company(conn, actor_email())
+    if user is None:
+        return None, (jsonify({"ok": False, "reason": "forbidden"}), 403)
+    if user["status"] != "approved":
+        return None, (jsonify({"ok": False, "reason": user["status"]}), 403)
+    if user["role"] not in roles:
+        return None, (jsonify({"ok": False, "reason": "forbidden"}), 403)
+    if user["role"] != "developer" and user.get("company_status") == "frozen":
+        return None, (jsonify({"ok": False, "reason": "company_frozen"}), 403)
+    return user, None
+
+
+def get_company_location(conn, company_id):
+    if company_id:
+        company = conn.execute(
+            """
+            SELECT latitude, longitude, radius_m
+              FROM companies
+             WHERE id = %s
+            """,
+            (company_id,),
+        ).fetchone()
+        if company is not None:
+            return {
+                "latitude": float(company["latitude"]),
+                "longitude": float(company["longitude"]),
+                "radiusMeters": float(company["radius_m"]),
+            }
     rows = conn.execute(
         """
         SELECT key, value
@@ -318,7 +463,16 @@ def get_company_location(conn):
 @app.before_request
 def ensure_database_ready():
     global DB_INITIALIZED
-    if DB_INITIALIZED or request.endpoint in {"health", "health_db", "setup_init_db"}:
+    if DB_INITIALIZED or request.endpoint in {
+        "health",
+        "health_db",
+        "setup_init_db",
+        "static",
+        "web_app",
+        "contact_page",
+        "about_page",
+        "privacy_page",
+    }:
         return
     init_db()
     DB_INITIALIZED = True
@@ -342,6 +496,12 @@ def about_page():
 @app.get("/privacy")
 def privacy_page():
     return send_from_directory(PAGES_DIR, "privacy.html")
+
+
+@app.get("/")
+@app.get("/web")
+def web_app():
+    return render_template("index.html")
 
 
 @app.get("/health/db")
@@ -485,6 +645,35 @@ def register():
     if not full_name or not email or not password:
         return jsonify({"ok": False, "reason": "required"}), 400
     with db_conn() as conn:
+        actor = None
+        if actor_email():
+            actor, error = require_actor(conn, {"admin", "developer"})
+            if error:
+                return error
+        if actor is None:
+            role = "worker"
+            status = "pending"
+            company_id = data.get("companyId") or data.get("company_id")
+        elif actor["role"] == "developer":
+            company_id = data.get("companyId") or data.get("company_id")
+        else:
+            company_id = actor["company_id"]
+            if role == "developer":
+                return jsonify({"ok": False, "reason": "forbidden"}), 403
+        if not company_id:
+            default_company = conn.execute(
+                "SELECT id FROM companies WHERE name = %s",
+                ("CODEVA",),
+            ).fetchone()
+            company_id = default_company["id"] if default_company else None
+        company = conn.execute(
+            "SELECT id, status FROM companies WHERE id = %s",
+            (company_id,),
+        ).fetchone()
+        if role != "developer" and company is None:
+            return jsonify({"ok": False, "reason": "company_not_found"}), 404
+        if role != "developer" and company["status"] == "frozen":
+            return jsonify({"ok": False, "reason": "company_frozen"}), 403
         existing = conn.execute("SELECT id FROM users WHERE email = %s", (email,)).fetchone()
         if existing is not None:
             return jsonify({"ok": False, "reason": "email_exists"}), 409
@@ -505,10 +694,19 @@ def register():
         conn.execute(
             """
             INSERT INTO users
-              (full_name, email, password_hash, phone, job_title, role, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+              (full_name, email, password_hash, phone, job_title, role, status, company_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (full_name, email, generate_password_hash(password), phone, job_title, role, status),
+            (
+                full_name,
+                email,
+                generate_password_hash(password, method=PASSWORD_HASH_METHOD),
+                phone,
+                job_title,
+                role,
+                status,
+                None if role == "developer" else company_id,
+            ),
         )
     return jsonify({"ok": True})
 
@@ -519,11 +717,13 @@ def login():
     email = (data.get("email") or "").strip()
     password = data.get("password") or ""
     with db_conn() as conn:
-        user = conn.execute("SELECT * FROM users WHERE email = %s", (email,)).fetchone()
+        user = user_with_company(conn, email)
     if user is None:
         return jsonify({"ok": False, "reason": "not_found"}), 404
     if user["status"] != "approved":
         return jsonify({"ok": False, "reason": user["status"]}), 403
+    if user["role"] != "developer" and user.get("company_status") == "frozen":
+        return jsonify({"ok": False, "reason": "company_frozen"}), 403
     if not password_matches(user["password_hash"], password):
         return jsonify({"ok": False, "reason": "invalid"}), 401
     return jsonify({"ok": True, "user": user_payload(user)})
@@ -545,7 +745,7 @@ def change_password():
             return jsonify({"ok": False, "reason": "invalid"}), 401
         conn.execute(
             "UPDATE users SET password_hash = %s WHERE id = %s",
-            (generate_password_hash(new_password), user["id"]),
+            (generate_password_hash(new_password, method=PASSWORD_HASH_METHOD), user["id"]),
         )
     return jsonify({"ok": True})
 
@@ -581,7 +781,7 @@ def reset_password():
         conn.execute("UPDATE email_otps SET used = true WHERE id = %s", (otp["id"],))
         conn.execute(
             "UPDATE users SET password_hash = %s WHERE id = %s",
-            (generate_password_hash(new_password), user["id"]),
+            (generate_password_hash(new_password, method=PASSWORD_HASH_METHOD), user["id"]),
         )
     return jsonify({"ok": True})
 
@@ -592,11 +792,13 @@ def scan_attendance():
     email = (data.get("email") or "").strip()
     token = (data.get("token") or "").strip()
     with db_conn() as conn:
-        user = conn.execute("SELECT * FROM users WHERE email = %s", (email,)).fetchone()
+        user = user_with_company(conn, email)
         if user is None:
             return jsonify({"ok": False, "reason": "not_found"}), 404
         if user["status"] != "approved":
             return jsonify({"ok": False, "reason": user["status"]}), 403
+        if user["role"] != "developer" and user.get("company_status") == "frozen":
+            return jsonify({"ok": False, "reason": "company_frozen"}), 403
         date = today_date()
         existing = conn.execute(
             "SELECT id FROM attendance WHERE user_id = %s AND attend_date = %s",
@@ -633,12 +835,14 @@ def location_attendance():
     except (TypeError, ValueError):
         return jsonify({"ok": False, "reason": "invalid_location"}), 400
     with db_conn() as conn:
-        user = conn.execute("SELECT * FROM users WHERE email = %s", (email,)).fetchone()
+        user = user_with_company(conn, email)
         if user is None:
             return jsonify({"ok": False, "reason": "not_found"}), 404
         if user["status"] != "approved":
             return jsonify({"ok": False, "reason": user["status"]}), 403
-        company = get_company_location(conn)
+        if user["role"] != "developer" and user.get("company_status") == "frozen":
+            return jsonify({"ok": False, "reason": "company_frozen"}), 403
+        company = get_company_location(conn, user["company_id"])
         distance_m = distance_meters(
             company["latitude"],
             company["longitude"],
@@ -701,6 +905,13 @@ def attendance_list():
         group_filter = "AND u.job_title = %s"
         params.append(group)
     with db_conn() as conn:
+        actor, error = require_actor(conn, {"admin", "developer"})
+        if error:
+            return error
+        company_filter = ""
+        if actor["role"] != "developer":
+            company_filter = "AND u.company_id = %s"
+            params.append(actor["company_id"])
         rows = conn.execute(
             f"""
             SELECT a.attend_date::text AS date,
@@ -712,10 +923,11 @@ def attendance_list():
                    a.verification_reason,
                    u.full_name AS name,
                    u.job_title AS "group"
-              FROM attendance a
+             FROM attendance a
               JOIN users u ON a.user_id = u.id
              WHERE to_char(a.attend_date, 'YYYY-MM') = %s
              {group_filter}
+             {company_filter}
              ORDER BY a.attend_date DESC, a.id DESC
             """,
             params,
@@ -727,8 +939,16 @@ def attendance_list():
 def attendance_report():
     month = request.args.get("month") or datetime.now().strftime("%Y-%m")
     with db_conn() as conn:
+        actor, error = require_actor(conn, {"admin", "developer"})
+        if error:
+            return error
+        params = [month]
+        company_filter = ""
+        if actor["role"] != "developer":
+            company_filter = "AND u.company_id = %s"
+            params.append(actor["company_id"])
         rows = conn.execute(
-            """
+            f"""
             SELECT u.full_name AS name,
                    COALESCE(SUM(CASE WHEN a.status = 'present' THEN 1 ELSE 0 END), 0)::int AS present,
                    COALESCE(SUM(CASE WHEN a.status IS NOT NULL AND a.status <> 'present' THEN 1 ELSE 0 END), 0)::int AS absent
@@ -737,10 +957,11 @@ def attendance_report():
                 ON a.user_id = u.id
                AND to_char(a.attend_date, 'YYYY-MM') = %s
              WHERE u.role = 'worker'
+             {company_filter}
              GROUP BY u.id
              ORDER BY lower(u.full_name)
             """,
-            (month,),
+            params,
         ).fetchall()
     return jsonify({"items": rows})
 
@@ -749,9 +970,32 @@ def attendance_report():
 def list_users():
     status = request.args.get("status") or "pending"
     with db_conn() as conn:
+        actor, error = require_actor(conn, {"admin", "developer"})
+        if error:
+            return error
+        params = []
+        status_filter = ""
+        if status != "all":
+            status_filter = "AND u.status = %s"
+            params.append(status)
+        company_filter = ""
+        if actor["role"] != "developer":
+            company_filter = "AND u.company_id = %s"
+            params.append(actor["company_id"])
+        elif request.args.get("companyId"):
+            company_filter = "AND u.company_id = %s"
+            params.append(request.args.get("companyId"))
         rows = conn.execute(
-            "SELECT * FROM users WHERE status = %s ORDER BY id DESC",
-            (status,),
+            f"""
+            SELECT u.*, c.name AS company_name, c.status AS company_status
+              FROM users u
+              LEFT JOIN companies c ON u.company_id = c.id
+             WHERE u.role <> 'developer'
+               {status_filter}
+               {company_filter}
+             ORDER BY u.id DESC
+            """,
+            params,
         ).fetchall()
     return jsonify({"users": [user_payload(row) for row in rows]})
 
@@ -759,14 +1003,160 @@ def list_users():
 @app.post("/admin/users/<int:user_id>/approve")
 def approve_user(user_id):
     with db_conn() as conn:
-        conn.execute("UPDATE users SET status = 'approved' WHERE id = %s", (user_id,))
+        actor, error = require_actor(conn, {"admin", "developer"})
+        if error:
+            return error
+        if actor["role"] == "developer":
+            conn.execute(
+                "UPDATE users SET status = 'approved' WHERE id = %s AND role <> 'developer'",
+                (user_id,),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE users
+                   SET status = 'approved'
+                 WHERE id = %s
+                   AND company_id = %s
+                   AND role <> 'developer'
+                """,
+                (user_id, actor["company_id"]),
+            )
     return jsonify({"ok": True})
 
 
 @app.post("/admin/users/<int:user_id>/reject")
 def reject_user(user_id):
     with db_conn() as conn:
-        conn.execute("UPDATE users SET status = 'rejected' WHERE id = %s", (user_id,))
+        actor, error = require_actor(conn, {"admin", "developer"})
+        if error:
+            return error
+        if actor["role"] == "developer":
+            conn.execute(
+                "UPDATE users SET status = 'rejected' WHERE id = %s AND role <> 'developer'",
+                (user_id,),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE users
+                   SET status = 'rejected'
+                 WHERE id = %s
+                   AND company_id = %s
+                   AND role <> 'developer'
+                """,
+                (user_id, actor["company_id"]),
+            )
+    return jsonify({"ok": True})
+
+
+@app.get("/developer/companies")
+def list_companies():
+    with db_conn() as conn:
+        actor, error = require_actor(conn, {"developer"})
+        if error:
+            return error
+        rows = conn.execute(
+            """
+            SELECT c.*,
+                   COUNT(u.id) FILTER (WHERE u.role <> 'developer')::int AS user_count
+              FROM companies c
+              LEFT JOIN users u ON u.company_id = c.id
+             GROUP BY c.id
+             ORDER BY c.id DESC
+            """
+        ).fetchall()
+    return jsonify({"companies": [company_payload(row) | {"userCount": row["user_count"]} for row in rows]})
+
+
+@app.post("/developer/companies")
+def create_company():
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    admin_name = (data.get("adminName") or data.get("admin_name") or "").strip()
+    admin_email = (data.get("adminEmail") or data.get("admin_email") or "").strip()
+    admin_password = data.get("adminPassword") or data.get("admin_password") or "Temp1234"
+    if not name or not admin_name or not admin_email:
+        return jsonify({"ok": False, "reason": "required"}), 400
+    with db_conn() as conn:
+        actor, error = require_actor(conn, {"developer"})
+        if error:
+            return error
+        existing_user = conn.execute(
+            "SELECT id FROM users WHERE email = %s",
+            (admin_email,),
+        ).fetchone()
+        if existing_user is not None:
+            return jsonify({"ok": False, "reason": "email_exists"}), 409
+        company = conn.execute(
+            """
+            INSERT INTO companies (name, status)
+            VALUES (%s, 'active')
+            RETURNING *
+            """,
+            (name,),
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO users
+              (full_name, email, password_hash, phone, job_title, role, status, company_id)
+            VALUES (%s, %s, %s, '', 'Admin', 'admin', 'approved', %s)
+            """,
+            (
+                admin_name,
+                admin_email,
+                generate_password_hash(admin_password, method=PASSWORD_HASH_METHOD),
+                company["id"],
+            ),
+        )
+    return jsonify({"ok": True, "company": company_payload(company)})
+
+
+@app.post("/developer/companies/<int:company_id>/freeze")
+def freeze_company(company_id):
+    with db_conn() as conn:
+        actor, error = require_actor(conn, {"developer"})
+        if error:
+            return error
+        conn.execute("UPDATE companies SET status = 'frozen' WHERE id = %s", (company_id,))
+    return jsonify({"ok": True})
+
+
+@app.post("/developer/companies/<int:company_id>/activate")
+def activate_company(company_id):
+    with db_conn() as conn:
+        actor, error = require_actor(conn, {"developer"})
+        if error:
+            return error
+        conn.execute("UPDATE companies SET status = 'active' WHERE id = %s", (company_id,))
+    return jsonify({"ok": True})
+
+
+@app.post("/developer/users/<int:user_id>/company")
+def assign_user_company(user_id):
+    data = request.get_json(silent=True) or {}
+    company_id = data.get("companyId") or data.get("company_id")
+    if not company_id:
+        return jsonify({"ok": False, "reason": "company_required"}), 400
+    with db_conn() as conn:
+        actor, error = require_actor(conn, {"developer"})
+        if error:
+            return error
+        company = conn.execute(
+            "SELECT id, status FROM companies WHERE id = %s",
+            (company_id,),
+        ).fetchone()
+        if company is None:
+            return jsonify({"ok": False, "reason": "company_not_found"}), 404
+        conn.execute(
+            """
+            UPDATE users
+               SET company_id = %s
+             WHERE id = %s
+               AND role <> 'developer'
+            """,
+            (company_id, user_id),
+        )
     return jsonify({"ok": True})
 
 
@@ -778,7 +1168,11 @@ def qr_today():
 @app.get("/company-location")
 def company_location():
     with db_conn() as conn:
-        location = get_company_location(conn)
+        actor, error = require_actor(conn, {"admin", "developer"})
+        if error:
+            return error
+        company_id = request.args.get("companyId") if actor["role"] == "developer" else actor["company_id"]
+        location = get_company_location(conn, company_id)
     return jsonify({"ok": True, "location": location})
 
 
@@ -794,23 +1188,23 @@ def update_company_location():
     if not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180) or radius_m <= 0:
         return jsonify({"ok": False, "reason": "invalid"}), 400
     with db_conn() as conn:
-        values = {
-            "company_latitude": str(latitude),
-            "company_longitude": str(longitude),
-            "company_radius_m": str(radius_m),
-        }
-        for key, value in values.items():
-            conn.execute(
-                """
-                INSERT INTO app_settings (key, value, updated_at)
-                VALUES (%s, %s, now())
-                ON CONFLICT (key) DO UPDATE SET
-                  value = EXCLUDED.value,
-                  updated_at = now()
-                """,
-                (key, value),
-            )
-        location = get_company_location(conn)
+        actor, error = require_actor(conn, {"admin", "developer"})
+        if error:
+            return error
+        company_id = data.get("companyId") if actor["role"] == "developer" else actor["company_id"]
+        if not company_id:
+            return jsonify({"ok": False, "reason": "company_required"}), 400
+        conn.execute(
+            """
+            UPDATE companies
+               SET latitude = %s,
+                   longitude = %s,
+                   radius_m = %s
+             WHERE id = %s
+            """,
+            (latitude, longitude, radius_m, company_id),
+        )
+        location = get_company_location(conn, company_id)
     return jsonify({"ok": True, "location": location})
 
 
@@ -822,13 +1216,15 @@ def add_location():
     if not email or not url:
         return jsonify({"ok": False, "reason": "required"}), 400
     with db_conn() as conn:
+        user = user_with_company(conn, email)
+        company_id = user["company_id"] if user else None
         row = conn.execute(
             """
-            INSERT INTO locations (email, url)
-            VALUES (%s, %s)
+            INSERT INTO locations (email, company_id, url)
+            VALUES (%s, %s, %s)
             RETURNING id, email, url, created_at
             """,
-            (email, url),
+            (email, company_id, url),
         ).fetchone()
     row["created_at"] = row["created_at"].isoformat()
     return jsonify({"ok": True, "location": row})
@@ -837,8 +1233,22 @@ def add_location():
 @app.get("/locations")
 def list_locations():
     with db_conn() as conn:
+        actor, error = require_actor(conn, {"admin", "developer"})
+        if error:
+            return error
+        params = []
+        company_filter = ""
+        if actor["role"] != "developer":
+            company_filter = "WHERE company_id = %s"
+            params.append(actor["company_id"])
         rows = conn.execute(
-            "SELECT id, email, url, created_at FROM locations ORDER BY id DESC"
+            f"""
+            SELECT id, email, url, created_at
+              FROM locations
+              {company_filter}
+             ORDER BY id DESC
+            """,
+            params,
         ).fetchall()
     for row in rows:
         row["created_at"] = row["created_at"].isoformat()
