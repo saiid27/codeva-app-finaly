@@ -9,6 +9,7 @@ const API_BASE =
   (["localhost", "127.0.0.1"].includes(window.location.hostname)
     ? "https://codeva-backend-a2ny.onrender.com"
     : "");
+let activeQrScanner = null;
 
 const copy = {
   fr: {
@@ -67,6 +68,10 @@ const copy = {
     usePosition: "Utiliser ma position actuelle",
     mapLink: "Lien Google Maps",
     token: "Token",
+    workerPassword: "Mot de passe temporaire",
+    workerAdded: "Employe ajoute",
+    cameraUnavailable: "Camera indisponible",
+    scanHint: "Placez le QR code devant la camera",
   },
   ar: {
     title: "نظام الحضور بالرمز",
@@ -124,6 +129,10 @@ const copy = {
     usePosition: "استخدم موقعي الحالي",
     mapLink: "رابط Google Maps",
     token: "الرمز",
+    workerPassword: "كلمة مرور مؤقتة",
+    workerAdded: "تمت إضافة العامل",
+    cameraUnavailable: "الكاميرا غير متاحة",
+    scanHint: "ضع رمز QR أمام الكاميرا",
   },
   en: {
     title: "Presence QR System",
@@ -181,6 +190,10 @@ const copy = {
     usePosition: "Use my current position",
     mapLink: "Google Maps link",
     token: "Token",
+    workerPassword: "Temporary password",
+    workerAdded: "Worker added",
+    cameraUnavailable: "Camera unavailable",
+    scanHint: "Place the QR code in front of the camera",
   },
 };
 
@@ -247,8 +260,7 @@ function renderLogin(message = "") {
     ${field("password", t("password"), "password")}
     <div class="link-row"><button type="button" class="text-link" data-view="forgot">${t("forgot")}</button><button type="button" class="text-link" data-view="change">${t("changePassword")}</button></div>
     <button class="primary-btn full" type="submit">${t("login")}</button>
-    <div class="link-row"><span>${t("noAccount")}</span><button type="button" class="text-link" data-view="signup">${t("create")}</button></div>
-    <p style="margin:0;text-align:center;font-size:12px;opacity:.72">${t("pending")}</p>`, message);
+    <p style="margin:12px 0 0;text-align:center;font-size:12px;opacity:.72">${t("pending")}</p>`, message);
   document.getElementById("authForm").onsubmit = login;
 }
 
@@ -320,6 +332,10 @@ function renderChange(message = "") {
 }
 
 function appLayout(title, content, dark = false) {
+  if (activeQrScanner) {
+    activeQrScanner.stop().catch(() => {});
+    activeQrScanner = null;
+  }
   document.documentElement.dir = state.lang === "ar" ? "rtl" : "ltr";
   app.innerHTML = `
     <main class="app-shell">
@@ -343,17 +359,14 @@ function routeForRole() {
 function renderUserHome(message = "") {
   appLayout(t("home"), `
     <div class="panel">
-      <div class="actions">
-        <button class="primary-btn" id="byLocation">${t("registerAttendance")}</button>
-        <button class="secondary-btn" id="byQr">${t("scan")}</button>
-        <button class="secondary-btn" id="sendLocation">${t("mapLink")}</button>
+      <div class="worker-actions">
+        <button class="primary-btn worker-btn" id="byQr">${t("scan")}</button>
+        <button class="secondary-btn worker-btn" id="byLocation">${t("registerAttendance")}</button>
       </div>
       ${message ? `<div class="message ${message.startsWith("!") ? "error" : "ok"}">${escapeHtml(message.replace(/^!/, ""))}</div>` : ""}
-    </div>
-    <div class="panel"><h2>${t("history")}</h2><div id="history" class="stack"><p>${t("empty")}</p></div></div>`);
+    </div>`);
   document.getElementById("byLocation").onclick = recordLocation;
-  document.getElementById("byQr").onclick = scanQrPrompt;
-  document.getElementById("sendLocation").onclick = addLocationPrompt;
+  document.getElementById("byQr").onclick = renderWorkerScanner;
 }
 
 async function recordLocation() {
@@ -364,18 +377,44 @@ async function recordLocation() {
   }, () => renderUserHome("!Permission de localisation refusee"), {enableHighAccuracy: true, timeout: 20000});
 }
 
-async function scanQrPrompt() {
-  const token = prompt(t("token"));
-  if (!token) return;
+async function scanQrToken(token) {
   const data = await api("/attendance/scan", {method: "POST", body: JSON.stringify({email: state.user.email, token})});
   renderUserHome(data.ok ? t("present") : "!" + reasonText(data.reason));
 }
 
-async function addLocationPrompt() {
-  const url = prompt(t("mapLink"));
-  if (!url) return;
-  const data = await api("/locations", {method: "POST", body: JSON.stringify({email: state.user.email, url})});
-  renderUserHome(data.ok ? t("save") : "!" + reasonText(data.reason));
+function renderWorkerScanner() {
+  appLayout(t("scan"), `
+    <div class="panel">
+      <p class="scan-hint">${t("scanHint")}</p>
+      <div id="qrReader"></div>
+      <div class="actions scanner-actions">
+        <button class="secondary-btn" data-action="home">${t("back")}</button>
+      </div>
+    </div>`);
+  startQrCamera();
+}
+
+async function startQrCamera() {
+  const reader = document.getElementById("qrReader");
+  if (!window.Html5Qrcode || !reader) {
+    renderUserHome("!" + t("cameraUnavailable"));
+    return;
+  }
+  const scanner = new Html5Qrcode("qrReader");
+  activeQrScanner = scanner;
+  try {
+    await scanner.start(
+      {facingMode: "environment"},
+      {fps: 10, qrbox: {width: 240, height: 240}},
+      async (decodedText) => {
+        await scanner.stop().catch(() => {});
+        activeQrScanner = null;
+        await scanQrToken(decodedText.trim());
+      },
+    );
+  } catch (_) {
+    renderUserHome("!" + t("cameraUnavailable"));
+  }
 }
 
 function renderAdmin() {
@@ -395,8 +434,22 @@ function navCard(view, title, sub, symbol, color) {
 }
 
 async function renderRequests() {
-  appLayout(t("requests"), `<div class="toolbar light-form">${field("search", t("search"))}<button class="primary-btn" id="addUser">${t("add")}</button></div><div id="users" class="stack"></div>`);
-  document.getElementById("addUser").onclick = addUserPrompt;
+  appLayout(t("requests"), `
+    <form class="panel light-form" id="addWorkerForm">
+      <h2>${t("add")} ${t("users")}</h2>
+      <div class="toolbar">
+        ${field("fullName", t("fullName"))}
+        ${field("email", t("email"), "email")}
+        ${field("phone", t("phone"))}
+        ${field("jobTitle", t("job"))}
+        ${field("password", t("workerPassword"), "text", "Temp1234")}
+        <button class="primary-btn" type="submit">${t("add")}</button>
+      </div>
+      <div id="addWorkerMessage"></div>
+    </form>
+    <div class="toolbar light-form">${field("search", t("search"))}</div>
+    <div id="users" class="stack"></div>`);
+  document.getElementById("addWorkerForm").onsubmit = addWorker;
   document.getElementById("search").oninput = loadUsers;
   await loadUsers();
 }
@@ -413,11 +466,23 @@ function userRow(user) {
   return `<div class="list-item"><div class="main"><strong>${escapeHtml(user.fullName)}</strong><small>${escapeHtml(user.email)} · ${escapeHtml(user.jobTitle || "")}</small></div><span class="badge ${user.status === "approved" ? "ok" : user.status === "rejected" ? "bad" : ""}">${user.status}</span><div class="actions"><button class="secondary-btn" data-approve="${user.id}">${t("approve")}</button><button class="danger-btn" data-reject="${user.id}">${t("reject")}</button></div></div>`;
 }
 
-async function addUserPrompt() {
-  const fullName = prompt(t("fullName"));
-  const email = prompt(t("email"));
-  if (!fullName || !email) return;
-  await api("/auth/register", {method: "POST", body: JSON.stringify({fullName, email, password: "Temp1234", role: "worker", status: "approved", actorEmail: state.user.email})});
+async function addWorker(event) {
+  event.preventDefault();
+  const body = formData(event.currentTarget);
+  const message = document.getElementById("addWorkerMessage");
+  const data = await api("/auth/register", {
+    method: "POST",
+    body: JSON.stringify({
+      ...body,
+      role: "worker",
+      status: "approved",
+      actorEmail: state.user.email,
+    }),
+  });
+  if (message) {
+    message.innerHTML = `<div class="message ${data.ok ? "ok" : "error"}">${escapeHtml(data.ok ? t("workerAdded") : reasonText(data.reason))}</div>`;
+  }
+  if (data.ok) event.currentTarget.reset();
   loadUsers();
 }
 

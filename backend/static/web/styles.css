@@ -372,6 +372,38 @@ a { color: inherit; }
   flex-wrap: wrap;
 }
 
+.worker-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.worker-btn {
+  min-height: 92px;
+  font-size: 17px;
+}
+
+.scan-hint {
+  margin: 0 0 12px;
+  color: var(--muted);
+  text-align: center;
+}
+
+#qrReader {
+  width: min(100%, 420px);
+  min-height: 320px;
+  margin: 0 auto;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0f172a;
+}
+
+.scanner-actions {
+  justify-content: center;
+  margin-top: 14px;
+}
+
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
