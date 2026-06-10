@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>عمالي - CODEVA Presence</title>
+    <link rel="icon" href="{{ url_for('static', filename='web/favicon.svg') }}">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="apple-touch-icon" href="{{ url_for('static', filename='web/icon-192.png') ~ '?v=20260607-10' }}">
+    <meta name="theme-color" content="#2f6e5a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="CODEVA Presence">
+    <link rel="stylesheet" href="{{ url_for('static', filename='web/styles.css') ~ '?v=20260607-10' }}">
+    <script src="{{ url_for('static', filename='web/pwa.js') ~ '?v=20260607-10' }}" defer></script>
+  </head>
+  <body class="dev-body">
+    <main class="dev-page">
+      <header class="dev-header">
+        <div>
+          <span class="brand-mark">CODEVA Presence</span>
+          <h1>عمالي</h1>
+          <p>قائمة العمال المسجلين في النظام.</p>
+        </div>
+        <a class="dev-link" href="/manager">رجوع</a>
+      </header>
+
+      {% if message %}
+        <p class="notice ok">{{ message }}</p>
+      {% endif %}
+      {% if error %}
+        <p class="notice error">{{ error }}</p>
+      {% endif %}
+
+      <section class="dev-card manager-form-card">
+        <div class="section-title">
+          <h2>إضافة عامل</h2>
+          <p>سيستخدم العامل الرقم وكلمة المرور لتسجيل الدخول.</p>
+        </div>
+        <form class="worker-form" action="/manager/workers" method="post">
+          <div class="form-field">
+            <label for="fullName">اسم العامل</label>
+            <input id="fullName" name="fullName" type="text" autocomplete="name" required>
+          </div>
+
+          <div class="form-field">
+            <label for="phone">رقم الدخول</label>
+            <input id="phone" name="phone" type="text" inputmode="tel" autocomplete="tel" required>
+          </div>
+
+          <div class="form-field">
+            <label for="jobTitle">الوظيفة</label>
+            <input id="jobTitle" name="jobTitle" type="text" autocomplete="organization-title">
+          </div>
+
+          <div class="form-field">
+            <label for="password">كلمة المرور</label>
+            <input id="password" name="password" type="text" value="1234" required>
+          </div>
+
+          <button class="form-submit" type="submit">إضافة العامل</button>
+        </form>
+      </section>
+
+      <section class="dev-card">
+        <div class="section-title">
+          <h2>قائمة العمال</h2>
+          <p>{{ workers|length }} حساب</p>
+        </div>
+        <div class="admin-list">
+          {% for worker in workers %}
+            <article class="admin-row">
+              <div>
+                <strong>{{ worker.full_name }}</strong>
+                <small>رقم الدخول: {{ worker.phone or "بدون رقم" }} · {{ worker.job_title or "بدون وظيفة" }}</small>
+              </div>
+              <span class="status {{ worker.status }}">{{ worker.status }}</span>
+            </article>
+          {% else %}
+            <p class="empty">لا توجد حسابات عمال بعد.</p>
+          {% endfor %}
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

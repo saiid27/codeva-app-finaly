@@ -644,6 +644,8 @@ class _LoginScreenState extends State<LoginScreen>
                             ],
                           ),
                         ),
+                        const SizedBox(height: 8),
+                        _FooterLinks(lang: _lang, onOpen: _openExternalLink),
                         const SizedBox(height: 10),
                       ],
                     ),
@@ -696,7 +698,11 @@ class _LoginScreenState extends State<LoginScreen>
       currentUserEmail = user['email']?.toString();
       currentUserRole = role;
       if (!mounted) return;
-      if (role == 'admin') {
+      if (role == 'developer') {
+        Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => DeveloperDashboard(lang: _lang)),
+        );
+      } else if (role == 'admin') {
         Navigator.of(
           context,
         ).push(MaterialPageRoute(builder: (_) => AdminDashboard(lang: _lang)));
@@ -705,9 +711,11 @@ class _LoginScreenState extends State<LoginScreen>
           context,
         ).push(MaterialPageRoute(builder: (_) => UserHome(lang: _lang)));
       }
-    } catch (_) {
+    } catch (error) {
       setState(() {
-        _error = 'Impossible de se connecter au serveur';
+        _error = useLocal
+            ? 'Erreur locale: ${error.runtimeType}'
+            : 'Impossible de se connecter au serveur';
       });
     } finally {
       if (mounted) {
@@ -722,12 +730,19 @@ class _LoginScreenState extends State<LoginScreen>
         return 'Compte en attente';
       case 'rejected':
         return 'Compte refusé';
+      case 'company_frozen':
+        return 'Compte entreprise suspendu';
       case 'invalid':
         return 'Identifiants invalides';
       case 'not_found':
       default:
         return 'Utilisateur introuvable';
     }
+  }
+
+  Future<void> _openExternalLink(String url) async {
+    final uri = Uri.parse(url);
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 }
 
@@ -1521,6 +1536,162 @@ class AdminDashboard extends StatelessWidget {
   }
 }
 
+class DeveloperDashboard extends StatefulWidget {
+  const DeveloperDashboard({super.key, required this.lang});
+
+  final AppLang lang;
+
+  @override
+  State<DeveloperDashboard> createState() => _DeveloperDashboardState();
+}
+
+class _DeveloperDashboardState extends State<DeveloperDashboard> {
+  bool _loading = true;
+  final List<_CompanyItem> _companies = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _fetch();
+  }
+
+  Future<void> _fetch() async {
+    setState(() => _loading = true);
+    try {
+      final rows = useLocal
+          ? await localApi.listCompanies()
+          : ((jsonDecode(
+                              (await http.get(
+                                Uri.parse(
+                                  '$apiBase/developer/companies?actorEmail=${Uri.encodeComponent(currentUserEmail ?? '')}',
+                                ),
+                              )).body,
+                            )
+                            as Map<String, dynamic>)['companies']
+                        as List<dynamic>? ??
+                    [])
+                .cast<Map<String, dynamic>>();
+      if (!mounted) return;
+      setState(() {
+        _companies
+          ..clear()
+          ..addAll(
+            rows.map(
+              (row) => _CompanyItem(
+                id: int.tryParse((row['id'] ?? '').toString()) ?? 0,
+                name: (row['name'] ?? '').toString(),
+                status: (row['status'] ?? 'active').toString(),
+                userCount:
+                    int.tryParse((row['userCount'] ?? '0').toString()) ?? 0,
+              ),
+            ),
+          );
+      });
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _addCompany() async {
+    final result = await showDialog<_NewCompanyData>(
+      context: context,
+      builder: (_) => _AddCompanyDialog(lang: widget.lang),
+    );
+    if (result == null) return;
+    if (useLocal) {
+      await localApi.createCompany(
+        name: result.companyName,
+        adminName: result.adminName,
+        adminEmail: result.adminEmail,
+        adminPassword: result.adminPassword,
+      );
+    } else {
+      await http.post(
+        Uri.parse('$apiBase/developer/companies'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'actorEmail': currentUserEmail,
+          'name': result.companyName,
+          'adminName': result.adminName,
+          'adminEmail': result.adminEmail,
+          'adminPassword': result.adminPassword,
+        }),
+      );
+    }
+    await _fetch();
+  }
+
+  Future<void> _toggleCompany(_CompanyItem company) async {
+    final nextStatus = company.status == 'frozen' ? 'active' : 'frozen';
+    if (useLocal) {
+      await localApi.setCompanyStatus(company.id, nextStatus);
+    } else {
+      final action = nextStatus == 'frozen' ? 'freeze' : 'activate';
+      await http.post(
+        Uri.parse(
+          '$apiBase/developer/companies/${company.id}/$action?actorEmail=${Uri.encodeComponent(currentUserEmail ?? '')}',
+        ),
+      );
+    }
+    await _fetch();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final lang = widget.lang;
+    return Scaffold(
+      backgroundColor: Colors.white,
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF263B52),
+        foregroundColor: Colors.white,
+        title: Text(
+          tr(
+            lang,
+            fr: 'Espace developpeur',
+            ar: 'لوحة المطور',
+            en: 'Developer',
+          ),
+        ),
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _addCompany,
+        icon: const Icon(Icons.add_business),
+        label: Text(tr(lang, fr: 'Entreprise', ar: 'شركة', en: 'Company')),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : ListView.separated(
+              padding: const EdgeInsets.all(16),
+              itemCount: _companies.length,
+              separatorBuilder: (_, __) => const SizedBox(height: 10),
+              itemBuilder: (context, index) {
+                final company = _companies[index];
+                final frozen = company.status == 'frozen';
+                return ListTile(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    side: const BorderSide(color: Color(0xFFE5E7EB)),
+                  ),
+                  leading: Icon(
+                    frozen ? Icons.lock : Icons.business,
+                    color: frozen ? Colors.red : const Color(0xFF0F766E),
+                  ),
+                  title: Text(company.name),
+                  subtitle: Text(
+                    '${company.userCount} comptes • ${frozen ? 'Frozen' : 'Active'}',
+                  ),
+                  trailing: IconButton(
+                    tooltip: frozen ? 'Activate' : 'Freeze',
+                    onPressed: () => _toggleCompany(company),
+                    icon: Icon(frozen ? Icons.play_arrow : Icons.pause),
+                  ),
+                );
+              },
+            ),
+    );
+  }
+}
+
 class _AdminCard extends StatelessWidget {
   const _AdminCard({
     required this.title,
@@ -1717,11 +1888,14 @@ class _AdminRequestsScreenState extends State<AdminRequestsScreen> {
   }
 
   Future<List<_AccountItem>> _fetchByStatus(String status) async {
+    final actor = Uri.encodeComponent(currentUserEmail ?? '');
     final list = useLocal
-        ? await localApi.listUsers(status)
+        ? await localApi.listUsers(status, actorEmail: currentUserEmail)
         : (jsonDecode(
                     (await http.get(
-                      Uri.parse('$apiBase/admin/users?status=$status'),
+                      Uri.parse(
+                        '$apiBase/admin/users?status=$status&actorEmail=$actor',
+                      ),
                     )).body,
                   )['users']
                   as List<dynamic>)
@@ -1741,19 +1915,25 @@ class _AdminRequestsScreenState extends State<AdminRequestsScreen> {
   }
 
   Future<void> _approveUser(int id) async {
+    final actor = Uri.encodeComponent(currentUserEmail ?? '');
     if (useLocal) {
       await localApi.approveUser(id);
     } else {
-      await http.post(Uri.parse('$apiBase/admin/users/$id/approve'));
+      await http.post(
+        Uri.parse('$apiBase/admin/users/$id/approve?actorEmail=$actor'),
+      );
     }
     await _fetchUsers();
   }
 
   Future<void> _rejectUser(int id) async {
+    final actor = Uri.encodeComponent(currentUserEmail ?? '');
     if (useLocal) {
       await localApi.rejectUser(id);
     } else {
-      await http.post(Uri.parse('$apiBase/admin/users/$id/reject'));
+      await http.post(
+        Uri.parse('$apiBase/admin/users/$id/reject?actorEmail=$actor'),
+      );
     }
     await _fetchUsers();
   }
@@ -1766,6 +1946,7 @@ class _AdminRequestsScreenState extends State<AdminRequestsScreen> {
         phone: item.phone,
         jobTitle: item.job,
         role: item.role,
+        actorEmail: currentUserEmail,
       );
     } else {
       await http.post(
@@ -1778,6 +1959,7 @@ class _AdminRequestsScreenState extends State<AdminRequestsScreen> {
           'phone': item.phone,
           'jobTitle': item.job,
           'role': item.role,
+          'actorEmail': currentUserEmail,
         }),
       );
     }
@@ -2023,11 +2205,12 @@ class _AdminAttendanceScreenState extends State<AdminAttendanceScreen> {
           ? await localApi.listAttendance(
               month: _selectedMonth,
               group: _selectedGroup,
+              actorEmail: currentUserEmail,
             )
           : (jsonDecode(
                           (await http.get(
                             Uri.parse(
-                              '$apiBase/attendance/list?month=$_selectedMonth&group=${_selectedGroup == 'Tous' ? '' : _selectedGroup}',
+                              '$apiBase/attendance/list?month=$_selectedMonth&group=${_selectedGroup == 'Tous' ? '' : _selectedGroup}&actorEmail=${Uri.encodeComponent(currentUserEmail ?? '')}',
                             ),
                           )).body,
                         )['items']
@@ -2094,7 +2277,7 @@ class _AdminLocationsScreenState extends State<AdminLocationsScreen> {
     setState(() => _loading = true);
     try {
       if (useLocal) {
-        final rows = await localApi.listLocations();
+        final rows = await localApi.listLocations(actorEmail: currentUserEmail);
         _items = rows
             .map(
               (row) => _LocationEntry(
@@ -2107,8 +2290,13 @@ class _AdminLocationsScreenState extends State<AdminLocationsScreen> {
             )
             .toList();
       } else {
+        final actor = Uri.encodeComponent(currentUserEmail ?? '');
         final data =
-            jsonDecode((await http.get(Uri.parse('$apiBase/locations'))).body)
+            jsonDecode(
+                  (await http.get(
+                    Uri.parse('$apiBase/locations?actorEmail=$actor'),
+                  )).body,
+                )
                 as Map<String, dynamic>;
         final rows = (data['items'] as List<dynamic>? ?? [])
             .cast<Map<String, dynamic>>();
@@ -2316,7 +2504,11 @@ class _AdminCompanyLocationScreenState
     try {
       final data =
           jsonDecode(
-                (await http.get(Uri.parse('$apiBase/company-location'))).body,
+                (await http.get(
+                  Uri.parse(
+                    '$apiBase/company-location?actorEmail=${Uri.encodeComponent(currentUserEmail ?? '')}',
+                  ),
+                )).body,
               )
               as Map<String, dynamic>;
       final location = (data['location'] as Map<String, dynamic>? ?? {});
@@ -2383,6 +2575,7 @@ class _AdminCompanyLocationScreenState
           'latitude': latitude,
           'longitude': longitude,
           'radiusMeters': radius,
+          'actorEmail': currentUserEmail,
         }),
       );
       final data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -2555,11 +2748,14 @@ class _AdminReportsScreenState extends State<AdminReportsScreen> {
     setState(() => _loading = true);
     try {
       final list = useLocal
-          ? await localApi.monthlyReport(month: _selectedMonth)
+          ? await localApi.monthlyReport(
+              month: _selectedMonth,
+              actorEmail: currentUserEmail,
+            )
           : (jsonDecode(
                           (await http.get(
                             Uri.parse(
-                              '$apiBase/attendance/report?month=$_selectedMonth',
+                              '$apiBase/attendance/report?month=$_selectedMonth&actorEmail=${Uri.encodeComponent(currentUserEmail ?? '')}',
                             ),
                           )).body,
                         )['items']
@@ -2932,7 +3128,7 @@ class _AdminQrScreenState extends State<AdminQrScreen> {
           ? await localApi.qrToday()
           : jsonDecode((await http.get(Uri.parse('$apiBase/qr/today'))).body)
                 as Map<String, dynamic>;
-      setState(() => _token = data['token']?.toString());
+      setState(() => _token = (data['url'] ?? data['token'])?.toString());
     } finally {
       setState(() => _loading = false);
     }
@@ -3363,6 +3559,106 @@ class _AccountItem {
   final String role;
 }
 
+class _CompanyItem {
+  _CompanyItem({
+    required this.id,
+    required this.name,
+    required this.status,
+    required this.userCount,
+  });
+
+  final int id;
+  final String name;
+  final String status;
+  final int userCount;
+}
+
+class _NewCompanyData {
+  _NewCompanyData({
+    required this.companyName,
+    required this.adminName,
+    required this.adminEmail,
+    required this.adminPassword,
+  });
+
+  final String companyName;
+  final String adminName;
+  final String adminEmail;
+  final String adminPassword;
+}
+
+class _FooterLinks extends StatelessWidget {
+  const _FooterLinks({required this.lang, required this.onOpen});
+
+  final AppLang lang;
+  final ValueChanged<String> onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final links = [
+      (
+        tr(
+          lang,
+          fr: 'A propos',
+          ar: '\u0645\u0646 \u0646\u062d\u0646',
+          en: 'About us',
+        ),
+        'https://codeva-backend-a2ny.onrender.com/about',
+      ),
+      (
+        tr(
+          lang,
+          fr: 'Politique de confidentialité',
+          ar: '\u0633\u064a\u0627\u0633\u0629 \u0627\u0644\u062e\u0635\u0648\u0635\u064a\u0629',
+          en: 'Privacy Policy',
+        ),
+        'https://codeva-backend-a2ny.onrender.com/privacy',
+      ),
+      (
+        tr(
+          lang,
+          fr: 'Contactez-nous',
+          ar: '\u062a\u0648\u0627\u0635\u0644 \u0645\u0639\u0646\u0627',
+          en: 'Contact us',
+        ),
+        'https://codeva-backend-a2ny.onrender.com/contact',
+      ),
+    ];
+
+    return Directionality(
+      textDirection: lang == AppLang.ar ? TextDirection.rtl : TextDirection.ltr,
+      child: Wrap(
+        alignment: WrapAlignment.center,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 6,
+        children: [
+          for (var i = 0; i < links.length; i++) ...[
+            TextButton(
+              onPressed: () => onOpen(links[i].$2),
+              style: TextButton.styleFrom(
+                foregroundColor: const Color(0xFF255B48),
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                minimumSize: const Size(0, 28),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                textStyle: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              child: Text(links[i].$1),
+            ),
+            if (i != links.length - 1)
+              const Text(
+                '|',
+                style: TextStyle(color: Color(0x66255B48), fontSize: 11),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
 class _LangChip extends StatelessWidget {
   const _LangChip({
     required this.label,
@@ -3613,6 +3909,114 @@ class _AddAccountDialogState extends State<_AddAccountDialog> {
             );
           },
           child: Text('Ajouter'),
+        ),
+      ],
+    );
+  }
+}
+
+class _AddCompanyDialog extends StatefulWidget {
+  const _AddCompanyDialog({required this.lang});
+
+  final AppLang lang;
+
+  @override
+  State<_AddCompanyDialog> createState() => _AddCompanyDialogState();
+}
+
+class _AddCompanyDialogState extends State<_AddCompanyDialog> {
+  final _companyController = TextEditingController();
+  final _adminNameController = TextEditingController();
+  final _adminEmailController = TextEditingController();
+  final _passwordController = TextEditingController(text: 'Temp1234');
+
+  @override
+  void dispose() {
+    _companyController.dispose();
+    _adminNameController.dispose();
+    _adminEmailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final lang = widget.lang;
+    return AlertDialog(
+      title: Text(
+        tr(
+          lang,
+          fr: 'Nouvelle entreprise',
+          ar: 'شركة جديدة',
+          en: 'New company',
+        ),
+      ),
+      content: SizedBox(
+        width: 440,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: _companyController,
+              decoration: const InputDecoration(
+                labelText: 'Company name',
+                prefixIcon: Icon(Icons.business),
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _adminNameController,
+              decoration: const InputDecoration(
+                labelText: 'Admin name',
+                prefixIcon: Icon(Icons.person),
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _adminEmailController,
+              decoration: const InputDecoration(
+                labelText: 'Admin email',
+                prefixIcon: Icon(Icons.mail),
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _passwordController,
+              decoration: const InputDecoration(
+                labelText: 'Temporary password',
+                prefixIcon: Icon(Icons.key),
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () {
+            final companyName = _companyController.text.trim();
+            final adminName = _adminNameController.text.trim();
+            final adminEmail = _adminEmailController.text.trim();
+            final password = _passwordController.text.trim();
+            if (companyName.isEmpty ||
+                adminName.isEmpty ||
+                adminEmail.isEmpty ||
+                password.isEmpty) {
+              return;
+            }
+            Navigator.of(context).pop(
+              _NewCompanyData(
+                companyName: companyName,
+                adminName: adminName,
+                adminEmail: adminEmail,
+                adminPassword: password,
+              ),
+            );
+          },
+          child: Text(tr(lang, fr: 'Creer', ar: 'إنشاء', en: 'Create')),
         ),
       ],
     );

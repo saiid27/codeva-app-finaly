@@ -11,13 +11,27 @@ class LocalApi {
   Database? _db;
 
   Future<Database> _open() async {
-    if (_db != null) return _db!;
+    if (_db != null) {
+      await _ensureSchema(_db!);
+      await _ensureDefaults(_db!);
+      return _db!;
+    }
     final dir = await getApplicationDocumentsDirectory();
     final dbPath = p.join(dir.path, 'presence_qr_local.db');
     _db = await openDatabase(
       dbPath,
-      version: 2,
+      version: 4,
       onCreate: (db, _) async {
+        await db.execute('''
+          CREATE TABLE companies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'active',
+            latitude REAL NOT NULL DEFAULT 18.0735,
+            longitude REAL NOT NULL DEFAULT -15.9582,
+            radius_m REAL NOT NULL DEFAULT 150
+          )
+        ''');
         await db.execute('''
           CREATE TABLE users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -27,7 +41,8 @@ class LocalApi {
             phone TEXT,
             job_title TEXT,
             role TEXT NOT NULL,
-            status TEXT NOT NULL
+            status TEXT NOT NULL,
+            company_id INTEGER
           )
         ''');
         await db.execute('''
@@ -57,31 +72,58 @@ class LocalApi {
           CREATE TABLE locations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT NOT NULL,
+            company_id INTEGER,
             url TEXT NOT NULL,
             created_at TEXT NOT NULL
           )
         ''');
       },
       onUpgrade: (db, oldVersion, newVersion) async {
-        if (oldVersion < 2) {
-          await _addColumnIfMissing(db, 'attendance', 'latitude', 'REAL');
-          await _addColumnIfMissing(db, 'attendance', 'longitude', 'REAL');
-          await _addColumnIfMissing(db, 'attendance', 'distance_m', 'REAL');
-          await _addColumnIfMissing(
-            db,
-            'attendance',
-            'verification_reason',
-            'TEXT',
-          );
-        }
+        await _ensureSchema(db);
       },
+      onOpen: _ensureSchema,
     );
     await _ensureDefaults(_db!);
     return _db!;
   }
 
+  Future<void> _ensureSchema(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS companies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'active',
+        latitude REAL NOT NULL DEFAULT 18.0735,
+        longitude REAL NOT NULL DEFAULT -15.9582,
+        radius_m REAL NOT NULL DEFAULT 150
+      )
+    ''');
+    await _addColumnIfMissing(db, 'users', 'phone', 'TEXT');
+    await _addColumnIfMissing(db, 'users', 'job_title', 'TEXT');
+    await _addColumnIfMissing(db, 'users', 'company_id', 'INTEGER');
+    await _addColumnIfMissing(db, 'attendance', 'latitude', 'REAL');
+    await _addColumnIfMissing(db, 'attendance', 'longitude', 'REAL');
+    await _addColumnIfMissing(db, 'attendance', 'distance_m', 'REAL');
+    await _addColumnIfMissing(db, 'attendance', 'verification_reason', 'TEXT');
+    await _addColumnIfMissing(db, 'locations', 'company_id', 'INTEGER');
+  }
+
   Future<void> _ensureDefaults(Database db) async {
     await db.delete('users', where: 'email = ? ', whereArgs: ['admin@local']);
+    await db.insert('companies', {
+      'name': 'CODEVA',
+      'status': 'active',
+      'latitude': 18.0735,
+      'longitude': -15.9582,
+      'radius_m': 150,
+    }, conflictAlgorithm: ConflictAlgorithm.ignore);
+    final defaultCompany = (await db.query(
+      'companies',
+      where: 'name = ? ',
+      whereArgs: ['CODEVA'],
+      limit: 1,
+    )).first;
+    final defaultCompanyId = defaultCompany['id'] as int;
 
     final admin = await db.query(
       'users',
@@ -98,22 +140,52 @@ class LocalApi {
         'job_title': 'Admin',
         'role': 'admin',
         'status': 'approved',
+        'company_id': defaultCompanyId,
       });
     } else {
       await db.update(
         'users',
-        {'password_hash': 'codeva123', 'role': 'admin', 'status': 'approved'},
+        {
+          'password_hash': 'codeva123',
+          'role': 'admin',
+          'status': 'approved',
+          'company_id': defaultCompanyId,
+        },
         where: 'email = ? ',
         whereArgs: ['admin@gmail.com'],
       );
     }
+    final developer = await db.query(
+      'users',
+      where: 'email = ? ',
+      whereArgs: ['developer@codeva.local'],
+      limit: 1,
+    );
+    if (developer.isEmpty) {
+      await db.insert('users', {
+        'full_name': 'Developer',
+        'email': 'developer@codeva.local',
+        'password_hash': 'codeva123',
+        'phone': '',
+        'job_title': 'Developer',
+        'role': 'developer',
+        'status': 'approved',
+        'company_id': null,
+      });
+    }
+    await db.update(
+      'users',
+      {'company_id': defaultCompanyId},
+      where: 'company_id IS NULL AND role <> ?',
+      whereArgs: ['developer'],
+    );
 
     final count =
         Sqflite.firstIntValue(
           await db.rawQuery('SELECT COUNT(*) FROM users'),
         ) ??
         0;
-    if (count <= 1) {
+    if (count <= 2) {
       await db.insert('users', {
         'full_name': 'User Demo',
         'email': 'user1@local',
@@ -122,6 +194,7 @@ class LocalApi {
         'job_title': 'Groupe A',
         'role': 'worker',
         'status': 'approved',
+        'company_id': defaultCompanyId,
       });
       await db.insert('users', {
         'full_name': 'User Pending',
@@ -131,17 +204,12 @@ class LocalApi {
         'job_title': 'Groupe B',
         'role': 'worker',
         'status': 'pending',
+        'company_id': defaultCompanyId,
       });
     }
   }
 
-  String _todayToken() {
-    final now = DateTime.now();
-    final y = now.year.toString().padLeft(4, '0');
-    final m = now.month.toString().padLeft(2, '0');
-    final d = now.day.toString().padLeft(2, '0');
-    return '$y$m$d';
-  }
+  static const String _attendanceQrToken = 'codeva-presence-checkin';
 
   Future<Map<String, dynamic>> requestOtp(
     String email, {
@@ -252,6 +320,17 @@ class LocalApi {
     );
     if (rows.isEmpty) return {'ok': false, 'reason': 'not_found'};
     final user = rows.first;
+    if (user['role'] != 'developer' && user['company_id'] != null) {
+      final company = await db.query(
+        'companies',
+        where: 'id = ? ',
+        whereArgs: [user['company_id']],
+        limit: 1,
+      );
+      if (company.isNotEmpty && company.first['status'] == 'frozen') {
+        return {'ok': false, 'reason': 'company_frozen'};
+      }
+    }
     if (user['status'] != 'approved') {
       return {'ok': false, 'reason': user['status']};
     }
@@ -265,6 +344,7 @@ class LocalApi {
         'fullName': user['full_name'],
         'email': user['email'],
         'role': user['role'],
+        'companyId': user['company_id'],
       },
     };
   }
@@ -322,16 +402,6 @@ class LocalApi {
       return {'ok': true, 'already': true};
     }
 
-    if (token != _todayToken()) {
-      await db.insert('attendance', {
-        'user_id': user['id'],
-        'attend_date': date,
-        'status': 'absent',
-        'time': null,
-      });
-      return {'ok': false, 'reason': 'invalid'};
-    }
-
     final time =
         '${today.hour.toString().padLeft(2, '0')}:${today.minute.toString().padLeft(2, '0')}';
     await db.insert('attendance', {
@@ -344,7 +414,7 @@ class LocalApi {
   }
 
   Future<Map<String, dynamic>> qrToday() async {
-    return {'token': _todayToken()};
+    return {'token': _attendanceQrToken};
   }
 
   Future<Map<String, dynamic>> recordLocationAttendance({
@@ -393,9 +463,36 @@ class LocalApi {
     return {'ok': true, 'already': false, 'verified': verified};
   }
 
-  Future<List<Map<String, dynamic>>> listUsers(String status) async {
+  Future<Map<String, dynamic>?> _actor(String? actorEmail) async {
+    if (actorEmail == null || actorEmail.isEmpty) return null;
     final db = await _open();
-    return db.query('users', where: 'status = ? ', whereArgs: [status]);
+    final rows = await db.query(
+      'users',
+      where: 'email = ? ',
+      whereArgs: [actorEmail],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : rows.first;
+  }
+
+  Future<List<Map<String, dynamic>>> listUsers(
+    String status, {
+    String? actorEmail,
+  }) async {
+    final db = await _open();
+    final actor = await _actor(actorEmail);
+    if (actor != null && actor['role'] != 'developer') {
+      return db.query(
+        'users',
+        where: 'status = ? AND company_id = ? AND role <> ?',
+        whereArgs: [status, actor['company_id'], 'developer'],
+      );
+    }
+    return db.query(
+      'users',
+      where: 'status = ? AND role <> ?',
+      whereArgs: [status, 'developer'],
+    );
   }
 
   Future<void> approveUser(int id) async {
@@ -424,8 +521,13 @@ class LocalApi {
     required String phone,
     required String jobTitle,
     required String role,
+    String? actorEmail,
   }) async {
     final db = await _open();
+    final actor = await _actor(actorEmail);
+    final companyId = actor != null && actor['role'] != 'developer'
+        ? actor['company_id']
+        : null;
     await db.insert('users', {
       'full_name': fullName,
       'email': email,
@@ -434,16 +536,26 @@ class LocalApi {
       'job_title': jobTitle,
       'role': role,
       'status': 'pending',
+      'company_id': companyId,
     });
   }
 
   Future<List<Map<String, dynamic>>> listAttendance({
     required String month,
     required String group,
+    String? actorEmail,
   }) async {
     final db = await _open();
+    final actor = await _actor(actorEmail);
     final whereGroup = group == 'Tous' ? '' : 'AND u.job_title = ? ';
-    final args = group == 'Tous' ? [month] : [month, group];
+    final whereCompany = actor != null && actor['role'] != 'developer'
+        ? 'AND u.company_id = ? '
+        : '';
+    final args = <Object?>[month];
+    if (group != 'Tous') args.add(group);
+    if (actor != null && actor['role'] != 'developer') {
+      args.add(actor['company_id']);
+    }
     return db.rawQuery('''
       SELECT a.attend_date, a.status, a.time, a.latitude, a.longitude,
              a.distance_m, a.verification_reason, u.full_name, u.job_title
@@ -451,6 +563,7 @@ class LocalApi {
       JOIN users u ON a.user_id = u.id
       WHERE substr(a.attend_date,1,7) = ?
       $whereGroup
+      $whereCompany
       ORDER BY a.attend_date DESC
     ''', args);
   }
@@ -470,10 +583,18 @@ class LocalApi {
 
   Future<List<Map<String, dynamic>>> monthlyReport({
     required String month,
+    String? actorEmail,
   }) async {
     final db = await _open();
-    final rows = await db.rawQuery(
-      '''
+    final actor = await _actor(actorEmail);
+    final whereCompany = actor != null && actor['role'] != 'developer'
+        ? 'AND u.company_id = ?'
+        : '';
+    final args = <Object?>[month];
+    if (actor != null && actor['role'] != 'developer') {
+      args.add(actor['company_id']);
+    }
+    final rows = await db.rawQuery('''
       SELECT
         u.full_name AS name,
         SUM(CASE WHEN a.status = 'present' THEN 1 ELSE 0 END) AS present,
@@ -483,25 +604,87 @@ class LocalApi {
         ON a.user_id = u.id
        AND a.attend_date LIKE ? || '%'
       WHERE u.role = 'worker'
+      $whereCompany
       GROUP BY u.id
       ORDER BY u.full_name COLLATE NOCASE ASC
-    ''',
-      [month],
-    );
+    ''', args);
     return rows;
+  }
+
+  Future<List<Map<String, dynamic>>> listCompanies() async {
+    final db = await _open();
+    return db.rawQuery('''
+      SELECT c.*, COUNT(u.id) AS userCount
+      FROM companies c
+      LEFT JOIN users u ON u.company_id = c.id AND u.role <> 'developer'
+      GROUP BY c.id
+      ORDER BY c.id DESC
+    ''');
+  }
+
+  Future<void> createCompany({
+    required String name,
+    required String adminName,
+    required String adminEmail,
+    required String adminPassword,
+  }) async {
+    final db = await _open();
+    final companyId = await db.insert('companies', {
+      'name': name,
+      'status': 'active',
+      'latitude': 18.0735,
+      'longitude': -15.9582,
+      'radius_m': 150,
+    });
+    await db.insert('users', {
+      'full_name': adminName,
+      'email': adminEmail,
+      'password_hash': adminPassword,
+      'phone': '',
+      'job_title': 'Admin',
+      'role': 'admin',
+      'status': 'approved',
+      'company_id': companyId,
+    });
+  }
+
+  Future<void> setCompanyStatus(int id, String status) async {
+    final db = await _open();
+    await db.update(
+      'companies',
+      {'status': status},
+      where: 'id = ? ',
+      whereArgs: [id],
+    );
   }
 
   Future<void> addLocation(String email, String url) async {
     final db = await _open();
+    final rows = await db.query(
+      'users',
+      where: 'email = ? ',
+      whereArgs: [email],
+      limit: 1,
+    );
     await db.insert('locations', {
       'email': email,
+      'company_id': rows.isEmpty ? null : rows.first['company_id'],
       'url': url,
       'created_at': DateTime.now().toIso8601String(),
     });
   }
 
-  Future<List<Map<String, dynamic>>> listLocations() async {
+  Future<List<Map<String, dynamic>>> listLocations({String? actorEmail}) async {
     final db = await _open();
+    final actor = await _actor(actorEmail);
+    if (actor != null && actor['role'] != 'developer') {
+      return db.query(
+        'locations',
+        where: 'company_id = ? ',
+        whereArgs: [actor['company_id']],
+        orderBy: 'id DESC',
+      );
+    }
     return db.query('locations', orderBy: 'id DESC');
   }
 }

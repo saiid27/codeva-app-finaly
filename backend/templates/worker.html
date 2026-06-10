@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>صفحة العامل - CODEVA Presence</title>
+    <link rel="icon" href="{{ url_for('static', filename='web/favicon.svg') }}">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="apple-touch-icon" href="{{ url_for('static', filename='web/icon-192.png') ~ '?v=20260610-qr-direct' }}">
+    <meta name="theme-color" content="#2f6e5a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="CODEVA Presence">
+    <link rel="stylesheet" href="{{ url_for('static', filename='web/styles.css') ~ '?v=20260610-qr-direct' }}">
+    <script src="{{ url_for('static', filename='web/jsqr.min.js') ~ '?v=1.4.0' }}" defer></script>
+    <script src="{{ url_for('static', filename='web/pwa.js') ~ '?v=20260610-qr-direct' }}" defer></script>
+  </head>
+  <body class="dev-body">
+    <main class="dev-page worker-page" data-worker-email="{{ worker_email }}">
+      <header class="dev-header">
+        <div>
+          <span class="brand-mark">CODEVA Presence</span>
+          <h1>صفحة العامل</h1>
+          <p>{{ worker_name or worker_email }}</p>
+        </div>
+        <form action="/worker/logout" method="post">
+          <button class="dev-link logout-button" type="submit">خروج</button>
+        </form>
+      </header>
+
+      <section class="worker-hero">
+        <h2>تسجيل الحضور</h2>
+        <p id="workerStatus">امسح QR الثابت لتسجيل الحضور.</p>
+        <div class="worker-action-grid">
+          <button class="worker-action primary" id="gpsButton" type="button">
+            <span class="tile-icon">▦</span>
+            <span>
+              <strong>سكان QR code</strong>
+              <small>يسجل الحضور مباشرة بدون GPS</small>
+            </span>
+          </button>
+          <button class="worker-action" id="qrButton" type="button">
+            <span class="tile-icon">✓</span>
+            <span>
+              <strong>فتح رابط الحضور</strong>
+              <small>إذا كان QR محفوظا كرابط ثابت</small>
+            </span>
+          </button>
+        </div>
+      </section>
+
+      <section class="dev-card scanner-card" id="scannerCard" hidden>
+        <div class="section-title">
+          <h2>الكاميرا</h2>
+          <p id="scannerHint">ضع QR code داخل إطار الكاميرا.</p>
+        </div>
+        <video id="qrVideo" playsinline muted></video>
+        <div class="manual-token" id="manualToken">
+          <div class="form-field">
+            <label for="tokenInput">رابط أو كود QR</label>
+            <input id="tokenInput" type="text" inputmode="url" placeholder="https://codeva-backend-a2ny.onrender.com/worker/checkin">
+          </div>
+          <button class="form-submit" id="submitToken" type="button">تأكيد الكود</button>
+        </div>
+        <button class="dev-link stop-camera" id="stopCamera" type="button">إغلاق الكاميرا</button>
+      </section>
+    </main>
+
+    <script>
+      const page = document.querySelector(".worker-page");
+      const email = page.dataset.workerEmail;
+      const statusBox = document.getElementById("workerStatus");
+      const gpsButton = document.getElementById("gpsButton");
+      const qrButton = document.getElementById("qrButton");
+      const scannerCard = document.getElementById("scannerCard");
+      const scannerHint = document.getElementById("scannerHint");
+      const video = document.getElementById("qrVideo");
+      const manualToken = document.getElementById("manualToken");
+      const tokenInput = document.getElementById("tokenInput");
+      const submitToken = document.getElementById("submitToken");
+      const stopCamera = document.getElementById("stopCamera");
+      let stream = null;
+      let scanning = false;
+
+      function setStatus(message, type = "") {
+        statusBox.textContent = message;
+        statusBox.className = type;
+      }
+
+      async function postJson(path, body) {
+        const response = await fetch(path, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(body),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.ok === false) throw data;
+        return data;
+      }
+
+      async function submitQrToken(token) {
+        if (!token) {
+          setStatus("أدخل رابط أو كود QR أولا.", "error");
+          return;
+        }
+        setStatus("تمت قراءة QR، جاري تسجيل الحضور...");
+        try {
+          const data = await postJson("/attendance/scan", {
+            email,
+            token,
+          });
+          stopScanner();
+          if (data.already) {
+            setStatus("تم تسجيل حضورك مسبقا اليوم.", "ok");
+          } else {
+            setStatus("تم تسجيل حضورك بنجاح.", "ok");
+          }
+        } catch (error) {
+          setStatus("تعذر التسجيل. تأكد أن QR هو رابط الحضور الثابت.", "error");
+        }
+      }
+
+      function stopScanner() {
+        scanning = false;
+        if (stream) {
+          stream.getTracks().forEach((track) => track.stop());
+          stream = null;
+        }
+        video.srcObject = null;
+        scannerCard.hidden = true;
+      }
+
+      function readQrWithCanvas(canvas, context) {
+        if (!window.jsQR || !video.videoWidth || !video.videoHeight) return null;
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const frame = context.getImageData(0, 0, canvas.width, canvas.height);
+        const code = window.jsQR(frame.data, frame.width, frame.height, {
+          inversionAttempts: "dontInvert",
+        });
+        return code?.data || null;
+      }
+
+      async function scanLoop(detector, canvas, context) {
+        if (!scanning) return;
+        try {
+          if (detector) {
+            const codes = await detector.detect(video);
+            if (codes.length) {
+              await submitQrToken(codes[0].rawValue);
+              return;
+            }
+          } else {
+            const value = readQrWithCanvas(canvas, context);
+            if (value) {
+              await submitQrToken(value);
+              return;
+            }
+          }
+        } catch (error) {
+          try {
+            const value = readQrWithCanvas(canvas, context);
+            if (value) {
+              await submitQrToken(value);
+              return;
+            }
+          } catch (fallbackError) {
+            scannerHint.textContent = "تعذر قراءة الكاميرا، يمكنك إدخال الكود يدويا.";
+          }
+        }
+        requestAnimationFrame(() => scanLoop(detector, canvas, context));
+      }
+
+      async function openScanner() {
+        scannerCard.hidden = false;
+        manualToken.hidden = false;
+        if (!navigator.mediaDevices?.getUserMedia) {
+          scannerHint.textContent = "متصفحك لا يدعم فتح الكاميرا، أدخل الكود يدويا.";
+          return;
+        }
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {facingMode: {ideal: "environment"}},
+            audio: false,
+          });
+          video.srcObject = stream;
+          await video.play();
+          const canvas = document.createElement("canvas");
+          const context = canvas.getContext("2d", {willReadFrequently: true});
+          let detector = null;
+          if ("BarcodeDetector" in window) {
+            detector = new BarcodeDetector({formats: ["qr_code"]});
+          } else if (!window.jsQR || !context) {
+            scannerHint.textContent = "الكاميرا مفتوحة. إذا لم تتم القراءة تلقائيا، أدخل الكود يدويا.";
+            return;
+          }
+          scanning = true;
+          scannerHint.textContent = "ضع QR code داخل إطار الكاميرا.";
+          scanLoop(detector, canvas, context);
+        } catch (error) {
+          scannerHint.textContent = "تعذر فتح الكاميرا، أدخل الكود يدويا.";
+        }
+      }
+
+      gpsButton.addEventListener("click", () => {
+        setStatus("امسح QR الثابت لتسجيل الحضور.");
+        openScanner();
+      });
+
+      qrButton.addEventListener("click", () => {
+        window.location.href = "/worker/checkin";
+      });
+
+      submitToken.addEventListener("click", () => submitQrToken(tokenInput.value.trim()));
+      stopCamera.addEventListener("click", stopScanner);
+    </script>
+  </body>
+</html>

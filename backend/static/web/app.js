@@ -16,7 +16,7 @@ const copy = {
     title: "Presence QR System",
     sub: "Attendance via QR code",
     login: "Connexion",
-    email: "Email",
+    email: "Email ou numero",
     password: "Mot de passe",
     forgot: "Mot de passe oublie ?",
     noAccount: "Pas de compte ?",
@@ -77,7 +77,7 @@ const copy = {
     title: "نظام الحضور بالرمز",
     sub: "الحضور عبر رمز QR",
     login: "تسجيل الدخول",
-    email: "البريد الإلكتروني",
+    email: "البريد الإلكتروني أو الرقم",
     password: "كلمة المرور",
     forgot: "نسيت كلمة المرور؟",
     noAccount: "لا تملك حساباً؟",
@@ -138,7 +138,7 @@ const copy = {
     title: "Presence QR System",
     sub: "Attendance via QR code",
     login: "Login",
-    email: "Email",
+    email: "Email or phone",
     password: "Password",
     forgot: "Forgot password?",
     noAccount: "No account?",
@@ -256,7 +256,7 @@ function authLayout(title, body, message = "") {
 function renderLogin(message = "") {
   state.view = "login";
   authLayout(t("login"), `
-    ${field("email", t("email"), "email")}
+    ${field("email", t("email"))}
     ${field("password", t("password"), "password")}
     <div class="link-row"><button type="button" class="text-link" data-view="forgot">${t("forgot")}</button><button type="button" class="text-link" data-view="change">${t("changePassword")}</button></div>
     <button class="primary-btn full" type="submit">${t("login")}</button>
@@ -270,6 +270,10 @@ async function login(event) {
   const data = await api("/auth/login", {method: "POST", body: JSON.stringify(body)});
   if (data.ok !== true) return renderLogin("!" + reasonText(data.reason));
   setUser(data.user);
+  if (data.redirect) {
+    window.location.href = `${API_BASE}${data.redirect}`;
+    return;
+  }
   routeForRole();
 }
 
@@ -352,7 +356,10 @@ function appLayout(title, content, dark = false) {
 function routeForRole() {
   if (!state.user) return renderLogin();
   if (state.user.role === "developer") return renderDeveloper();
-  if (state.user.role === "admin") return renderAdmin();
+  if (["admin", "manager", "company_manager", "company_admin"].includes(state.user.role)) {
+    window.location.href = `${API_BASE}/manager`;
+    return;
+  }
   return renderUserHome();
 }
 
@@ -506,10 +513,11 @@ async function loadAttendance() {
 async function renderQr() {
   appLayout(t("todayQr"), `<div class="panel"><div id="qrBox"></div><p style="text-align:center"><b id="qrToken"></b></p></div>`);
   const data = await api("/qr/today");
-  document.getElementById("qrToken").textContent = data.token || "";
+  const qrValue = data.url || data.token || "";
+  document.getElementById("qrToken").textContent = qrValue;
   const box = document.getElementById("qrBox");
-  if (window.QRCode) new QRCode(box, {text: data.token || "", width: 190, height: 190});
-  else box.textContent = data.token || "";
+  if (window.QRCode) new QRCode(box, {text: qrValue, width: 190, height: 190});
+  else box.textContent = qrValue;
 }
 
 async function renderLocations() {

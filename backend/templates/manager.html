@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>لوحة المدير - CODEVA Presence</title>
+    <link rel="icon" href="{{ url_for('static', filename='web/favicon.svg') }}">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="apple-touch-icon" href="{{ url_for('static', filename='web/icon-192.png') ~ '?v=20260607-10' }}">
+    <meta name="theme-color" content="#2f6e5a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="CODEVA Presence">
+    <link rel="stylesheet" href="{{ url_for('static', filename='web/styles.css') ~ '?v=20260607-10' }}">
+    <script src="{{ url_for('static', filename='web/pwa.js') ~ '?v=20260607-10' }}" defer></script>
+  </head>
+  <body class="dev-body">
+    <main class="dev-page">
+      <header class="dev-header">
+        <div>
+          <span class="brand-mark">CODEVA Presence</span>
+          <h1>لوحة المدير</h1>
+          <p>{{ manager_email }}</p>
+        </div>
+        <form action="/manager/logout" method="post">
+          <button class="dev-link logout-button" type="submit">خروج</button>
+        </form>
+      </header>
+
+      <section class="manager-grid" aria-label="روابط لوحة المدير">
+        <a class="manager-tile" href="/manager/workers">
+          <span class="tile-icon">+</span>
+          <span>
+            <strong>عمالي</strong>
+            <small>إضافة العمال وعرض حساباتهم</small>
+          </span>
+        </a>
+        <a class="manager-tile" href="/manager/attendance">
+          <span class="tile-icon">✓</span>
+          <span>
+            <strong>الحضور والغياب</strong>
+            <small>من حضر ومن غاب اليوم</small>
+          </span>
+        </a>
+        <a class="manager-tile" href="/manager/report">
+          <span class="tile-icon">#</span>
+          <span>
+            <strong>التقرير الأسبوعي</strong>
+            <small>حضور وغياب كل عامل هذا الأسبوع</small>
+          </span>
+        </a>
+      </section>
+    </main>
+  </body>
+</html>
